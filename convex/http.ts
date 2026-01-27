@@ -1,13 +1,13 @@
 import { httpRouter } from "convex/server";
 import { httpAction } from "./_generated/server";
 import { Webhook } from "svix";
-import { WebhookEvent } from "@clerk/nextjs/server"
-
+import { WebhookEvent } from "@clerk/nextjs/server";
+import { api } from "./_generated/api";
 
 
 const http = httpRouter();
 
-const clerkWebhook = httpAction(async (ctx,request) => {
+const clerkWebhook = httpAction(async (ctx, request) => {
     const webhookSecret = process.env.CLERK_WEBHOOK_SECRET
     if (!webhookSecret) {
         throw new Error("Missing CLERK_WEBHOOK_SECRET environment variable")
@@ -17,13 +17,13 @@ const clerkWebhook = httpAction(async (ctx,request) => {
     const svix_signature = request.headers.get("svix-signature")
     const svix_timestamp = request.headers.get("svix-timestamp")
     if(!svix_id || !svix_signature || !svix_timestamp) {
-        return new Response("Error occured -- no svix headers", {
+        return new Response("Error occurred -- no svix headers", {
             status: 400,
         })
     }
 
-    const payload = await request.json();
-    const body =  JSON.stringify(payload);
+    // Use raw body for Svix signature verification.
+    const body = await request.text();
 
     const wh = new Webhook(webhookSecret);
     let evt: WebhookEvent;
@@ -36,17 +36,34 @@ const clerkWebhook = httpAction(async (ctx,request) => {
         }) as WebhookEvent
     } catch (err) {
         console.log("Error verifying webhook", err);
-        return new Response("Error occured", { status: 400 });
+        return new Response("Error occurred", { status: 400 });
     }
 
-    try {
-        //todo: create the user save it to the db
-    } catch (error) {
-        console.error("Error handling webhook", error);
-        return new Response("Error occured", { status: 500 });
-    }
+    const eventType = evt.type;
 
-    return new Response("OK", { status: 200 });
+    if(eventType === "user.created") {
+        const { id, email_addresses, first_name, last_name} = evt.data;
+        const email = email_addresses[0]?.email_address;
+        if (!email) {
+            return new Response("Missing email address", { status: 400 });
+        }
+        const name = `${first_name || ""} ${last_name || ""}`.trim();
+
+        try {
+            await ctx.runMutation(api.users.createUser, {
+                email,
+                name,
+                clerkId: id,
+            });
+            //todo create stripe customer as well
+            //send welcome email
+        } catch (error) {
+            console.error("Error creating USER IN convex", error);
+            return new Response("Error creating user", { status: 500 });
+        }
+
+    }
+    return new Response("Webhook processed successfully", { status:200 });
 });
 
 http.route({
